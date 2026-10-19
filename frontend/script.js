@@ -120,7 +120,7 @@ function toS3() {
   appData.email = em;
   document.getElementById('sA').textContent = `$${appData.loanAmount}`;
   document.getElementById('sT').textContent = `${appData.loanDuration} Days`;
-  document.getElementById('sR').textContent = `$${(appData.loanAmount * (1 + 0.005 * appData.loanDuration)).toFixed(2)}`;
+  document.getElementById('sR').textContent = `$${(appData.loanAmount * 1.03).toFixed(2)}`;
   document.getElementById('sN').textContent = `${fi} ${la}`;
   goTo('page-step3');
 }
