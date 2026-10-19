@@ -85,7 +85,7 @@ function startApplication() {
 function updateStep1Calc() {
   let amt = parseInt(document.getElementById('s1am').value);
   let dur = parseInt(document.getElementById('s1dur').value);
-  let interest = amt * 0.005 * dur;
+  let interest = amt * 0.03;          // ← flat 3%
   let total = amt + interest;
   document.getElementById('s1AmtDisplay').textContent = `$${amt}`;
   document.getElementById('s1DurDisplay').textContent = `${dur} days`;
